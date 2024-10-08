@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import time
 from multiprocessing import cpu_count
+from sched import scheduler
 from typing import Union, NamedTuple
 
 import torch
@@ -112,6 +113,9 @@ def main(args):
     # Week 3 task: change the optimizer to Momentum
     optimizer = optim.SGD(model.parameters(), lr = args.learning_rate, momentum = 0.9)
 
+    # Week 3 task: define a scheduler
+    schedular = torch.optim.lr_scheduler.StepLR(optimizer, step_size = 20, gamma = 0.1)
+
     log_dir = get_summary_writer_log_dir(args)
     print(f"Writing logs to {log_dir}")
     summary_writer = SummaryWriter(
@@ -119,7 +123,7 @@ def main(args):
             flush_secs=5
     )
     trainer = Trainer(
-        model, train_loader, test_loader, criterion, optimizer, summary_writer, DEVICE
+        model, train_loader, test_loader, criterion, optimizer, summary_writer, DEVICE, schedular
     )
 
     trainer.train(
@@ -207,6 +211,7 @@ class Trainer:
         optimizer: Optimizer,
         summary_writer: SummaryWriter,
         device: torch.device,
+        schedular: torch.optim.lr_scheduler.StepLR
     ):
         self.model = model.to(device)
         self.device = device
@@ -216,6 +221,7 @@ class Trainer:
         self.optimizer = optimizer
         self.summary_writer = summary_writer
         self.step = 0
+        self.schedular = schedular
 
     def train(
         self,
@@ -266,6 +272,7 @@ class Trainer:
                     self.print_metrics(epoch, accuracy, loss, data_load_time, step_time)
 
                 self.step += 1
+                self.schedular.step()
                 data_load_start_time = time.time()
 
             self.summary_writer.add_scalar("epoch", epoch, self.step)
@@ -367,7 +374,8 @@ def get_summary_writer_log_dir(args: argparse.Namespace) -> str:
     """
     # tb_log_dir_prefix = f'CNN_bs={args.batch_size}_lr={args.learning_rate}_run_'
     # tb_log_dir_prefix = f'CNN_bn_bs={args.batch_size}_lr={args.learning_rate}_run_'
-    tb_log_dir_prefix = f'CNN_bn_bs={args.batch_size}_lr={args.learning_rate}_momentum=0.9_run_'
+    # tb_log_dir_prefix = f'CNN_bn_bs={args.batch_size}_lr={args.learning_rate}_momentum=0.9_run_'
+    tb_log_dir_prefix = f'CNN_bn_bs={args.batch_size}_lr={args.learning_rate}_momentum=0.9_scheduler_run_'
     i = 0
     while i < 1000:
         tb_log_dir = args.log_dir / (tb_log_dir_prefix + str(i))
