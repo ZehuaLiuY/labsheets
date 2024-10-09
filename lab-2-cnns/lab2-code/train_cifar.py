@@ -66,6 +66,13 @@ parser.add_argument(
     help="Number of worker processes used to load data.",
 )
 
+# parser.add_argument(
+#     "--sgd-momentum",
+#     default = 0,
+#     type = float,
+# )
+
+
 
 class ImageShape(NamedTuple):
     height: int
@@ -272,10 +279,12 @@ class Trainer:
                     self.print_metrics(epoch, accuracy, loss, data_load_time, step_time)
 
                 self.step += 1
-                self.schedular.step()
+
                 data_load_start_time = time.time()
 
+            self.schedular.step()
             self.summary_writer.add_scalar("epoch", epoch, self.step)
+
             if ((epoch + 1) % val_frequency) == 0:
                 self.validate()
                 # self.validate() will put the model in validation mode,
