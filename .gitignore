@@ -165,3 +165,6 @@ fabric.properties
 .idea
 
 .DS_store
+/lab-4-augment/data/
+
+/lab-4-augment/logs/
