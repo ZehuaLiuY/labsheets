@@ -3,13 +3,15 @@ import time
 from multiprocessing import cpu_count
 from sched import scheduler
 from typing import Union, NamedTuple
-
+import os
 import torch
 import torch.backends.cudnn
 import numpy as np
+from scipy.linalg import toeplitz
 from torch import nn, optim
 from torch.nn import functional as F
 import torchvision.datasets
+from torch.nn.functional import dropout
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -74,6 +76,35 @@ parser.add_argument(
     default=0,
     type=float
 )
+parser.add_argument(
+    "--dropout",
+    default=0,
+    type=float,
+)
+
+# checkpoints
+parser.add_argument(
+    "--checkpoint-path",
+    type=Path,
+)
+
+parser.add_argument(
+    "--checkpoint-frequency",
+    type=int,
+    default = 1,
+    help="Save a checkpoint every N epochs"
+)
+
+parser.add_argument(
+    "--resume-checkpoint",
+    type = Path,
+)
+
+parser.add_argument(
+    "--start-epoch",
+    type = int,
+    default = 0,
+)
 
 # parser.add_argument(
 #     "--sgd-momentum",
@@ -133,9 +164,16 @@ def main(args):
         pin_memory=True,
     )
 
-    model = CNN(height=32, width=32, channels=3, class_count=10)
+    model = CNN(height=32, width=32, channels=3, class_count=10, dropout=args.dropout)
 
-
+    # checkpoint model resume
+    if args.resume_checkpoint.exists():
+        start_dict = torch.load(args.resume_checkpoint)
+        print(f"Loading model from {args.resume_checkpoint} that achieved {start_dict['accuracy'] * 100:.2f}% accuracy")
+        model.load_state_dict(start_dict)
+    else:
+        print("Training from scratch")
+        
     ## TASK 8: Redefine the criterion to be softmax cross entropy
     criterion = nn.CrossEntropyLoss()
 
@@ -154,7 +192,10 @@ def main(args):
             flush_secs=5
     )
     trainer = Trainer(
-        model, train_loader, test_loader, criterion, optimizer, summary_writer, DEVICE, schedular
+        model, train_loader, test_loader, criterion, optimizer, summary_writer, DEVICE, schedular,
+        checkpoint_path = args.checkpoint_path,
+        checkpoint_frequency = args.checkpoint_frequency,
+        args = args
     )
 
     trainer.train(
@@ -168,11 +209,11 @@ def main(args):
 
 
 class CNN(nn.Module):
-    def __init__(self, height: int, width: int, channels: int, class_count: int):
+    def __init__(self, height: int, width: int, channels: int, class_count: int, dropout: float):
         super().__init__()
         self.input_shape = ImageShape(height=height, width=width, channels=channels)
         self.class_count = class_count
-
+        self.dropout = nn.Dropout(dropout)
         self.conv1 = nn.Conv2d(
             in_channels=self.input_shape.channels,
             out_channels=32,
@@ -217,8 +258,10 @@ class CNN(nn.Module):
         # print(x.shape)
         ## TASK 5-2: Pass x through the first fully connected layer
         x = self.fc1(x)
+        x = self.dropout(x)
         x = self.bn3(x)
         ## TASK 6-2: Pass x through the last fully connected layer
+        x = self.dropout(x)
         x = self.fc2(x)
         return x
 
@@ -242,7 +285,10 @@ class Trainer:
         optimizer: Optimizer,
         summary_writer: SummaryWriter,
         device: torch.device,
-        schedular: torch.optim.lr_scheduler.StepLR
+        schedular: torch.optim.lr_scheduler.StepLR,
+        checkpoint_path: Path,
+        checkpoint_frequency: int,
+        args
     ):
         self.model = model.to(device)
         self.device = device
@@ -253,6 +299,10 @@ class Trainer:
         self.summary_writer = summary_writer
         self.step = 0
         self.schedular = schedular
+        self.checkpoint_path = checkpoint_path
+        self.checkpoint_frequency = checkpoint_frequency
+        self.args = args
+
 
     def train(
         self,
@@ -260,7 +310,8 @@ class Trainer:
         val_frequency: int,
         print_frequency: int = 20,
         log_frequency: int = 5,
-        start_epoch: int = 0
+        start_epoch: int = 0,
+        args = None
     ):
         self.model.train()
         for epoch in range(start_epoch, epochs):
@@ -314,6 +365,15 @@ class Trainer:
                 # self.validate() will put the model in validation mode,
                 # so we have to switch back to train mode afterwards
                 self.model.train()
+            if ((epoch + 1) % self.checkpoint_frequency) == 0 and self.checkpoint_path:
+                checkpoint_file = os.path.join(self.checkpoint_path, f"model_epoch_{epoch + 1}.pth")
+                torch.save({
+                    'args': args,
+                    'model': self.model.state_dict(),
+                    'accuracy': accuracy,
+                    'epoch': epoch,
+                }, checkpoint_file)
+                print(f"Checkpoint saved at {checkpoint_file}")
 
     def print_metrics(self, epoch, accuracy, loss, data_load_time, step_time):
         epoch_step = self.step % len(self.train_loader)
@@ -368,6 +428,14 @@ class Trainer:
         )
         average_loss = total_loss / len(self.val_loader)
 
+        # Week 4: calculate per class accuracy
+        per_class_accuracy = compute_per_class_accuracy(
+            np.array(results["labels"]), np.array(results["preds"]), num_classes=self.model.class_count,
+        )
+        for class_idx, acc in enumerate(per_class_accuracy):
+            print(f"Class {class_idx}: Accuracy: {acc * 100:.2f}%")
+
+
         self.summary_writer.add_scalars(
                 "accuracy",
                 {"test": accuracy},
@@ -380,6 +448,16 @@ class Trainer:
         )
         print(f"validation loss: {average_loss:.5f}, accuracy: {accuracy * 100:2.2f}")
 
+def compute_per_class_accuracy(labels, preds, num_classes):
+    correct_class = torch.zeros(num_classes)
+    total_class = torch.zeros(num_classes)
+
+    for label, pred in zip(labels, preds):
+        if label == pred:
+            correct_class[label] += 1
+        total_class[label] += 1
+
+    return correct_class / total_class
 
 def compute_accuracy(
     labels: Union[torch.Tensor, np.ndarray], preds: Union[torch.Tensor, np.ndarray]
@@ -411,6 +489,7 @@ def get_summary_writer_log_dir(args: argparse.Namespace) -> str:
     # tb_log_dir_prefix = f'CNN_bn_bs={args.batch_size}_lr={args.learning_rate}_momentum=0.9_scheduler_run_'
     tb_log_dir_prefix =(
         f"CNN_bn_"
+        f"dropout={args.dropout}_"
         f"bs={args.batch_size}_"
         f"lr={args.learning_rate}_"
         f"momentum=0.9_" +
