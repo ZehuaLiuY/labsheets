@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from multiprocessing import cpu_count
 from typing import Union, NamedTuple
+import sys
+from unittest.mock import patch
 
 import torch
 import torch.backends.cudnn
@@ -81,6 +83,11 @@ else:
 
 
 def main(args):
+    # test for patchifying image
+    batch = torch.randn(2, 3, 32, 32)
+    patches = patchify(batch, 8, 8)
+    print(patches.shape)
+
     transform = transforms.ToTensor()
     args.dataset_root.mkdir(parents=True, exist_ok=True)
     train_dataset = torchvision.datasets.CIFAR10(
@@ -113,8 +120,8 @@ def main(args):
     log_dir = get_summary_writer_log_dir(args)
     print(f"Writing logs to {log_dir}")
     summary_writer = SummaryWriter(
-            str(log_dir),
-            flush_secs=5
+        str(log_dir),
+        flush_secs=5
     )
     trainer = Trainer(
         model, train_loader, test_loader, criterion, optimizer, summary_writer, DEVICE
@@ -136,26 +143,35 @@ class CIFAR_Transformer(nn.Module):
         assert width % patch_size[0] == 0 and height % patch_size[1] == 0
         self.class_count = class_count
         self.n_heads = n_heads
+        self.patch_size = patch_size
         #TASKS 2, 3.1, 7, 8, 9.1, 11.1
- 
+        self.encoder = nn.TransformerEncoderLayer(d_model=192, nhead=1,batch_first=True)
+        # self.averge_pool =
+        self.fc1 = nn.Linear(192, 10)
+
+
 
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        x = nn.Identity(images)
+        x = images
         #TASKS 1, 2, 3.2, 7, 8, 9.2, 10, 11.2
+        x = self.encoder(x)
+        x = x.mean(1)
+        x = self.fc1(x)
+
         return x
 
 
 class Trainer:
     def __init__(
-        self,
-        model: nn.Module,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
-        criterion: nn.Module,
-        optimizer: Optimizer,
-        summary_writer: SummaryWriter,
-        device: torch.device,
+            self,
+            model: nn.Module,
+            train_loader: DataLoader,
+            val_loader: DataLoader,
+            criterion: nn.Module,
+            optimizer: Optimizer,
+            summary_writer: SummaryWriter,
+            device: torch.device,
     ):
         self.model = model.to(device)
         self.device = device
@@ -167,14 +183,15 @@ class Trainer:
         self.step = 0
 
     def train(
-        self,
-        epochs: int,
-        val_frequency: int,
-        print_frequency: int = 20,
-        log_frequency: int = 5,
-        start_epoch: int = 0
+            self,
+            epochs: int,
+            val_frequency: int,
+            print_frequency: int = 20,
+            log_frequency: int = 5,
+            start_epoch: int = 0
     ):
         self.model.train()
+        # print(count_parameters(self.model))
         #TASK 5
         for epoch in range(start_epoch, epochs):
             self.model.train()
@@ -183,12 +200,11 @@ class Trainer:
                 batch = batch.to(self.device)
                 labels = labels.to(self.device)
                 data_load_end_time = time.time()
-
-
+                batch = patchify(batch, 8, 8)
                 logits = self.model.forward(batch)
 
                 #TASK 4
-                sys.exit()
+                # sys.exit()
 
                 loss = self.criterion(logits, labels)
 
@@ -222,32 +238,32 @@ class Trainer:
     def print_metrics(self, epoch, accuracy, loss, data_load_time, step_time):
         epoch_step = self.step % len(self.train_loader)
         print(
-                f"epoch: [{epoch}], "
-                f"step: [{epoch_step}/{len(self.train_loader)}], "
-                f"batch loss: {loss:.5f}, "
-                f"batch accuracy: {accuracy * 100:2.2f}, "
-                f"data load time: "
-                f"{data_load_time:.5f}, "
-                f"step time: {step_time:.5f}"
+            f"epoch: [{epoch}], "
+            f"step: [{epoch_step}/{len(self.train_loader)}], "
+            f"batch loss: {loss:.5f}, "
+            f"batch accuracy: {accuracy * 100:2.2f}, "
+            f"data load time: "
+            f"{data_load_time:.5f}, "
+            f"step time: {step_time:.5f}"
         )
 
     def log_metrics(self, epoch, accuracy, loss, data_load_time, step_time):
         self.summary_writer.add_scalar("epoch", epoch, self.step)
         self.summary_writer.add_scalars(
-                "accuracy",
-                {"train": accuracy},
-                self.step
+            "accuracy",
+            {"train": accuracy},
+            self.step
         )
         self.summary_writer.add_scalars(
-                "loss",
-                {"train": float(loss.item())},
-                self.step
+            "loss",
+            {"train": float(loss.item())},
+            self.step
         )
         self.summary_writer.add_scalar(
-                "time/data", data_load_time, self.step
+            "time/data", data_load_time, self.step
         )
         self.summary_writer.add_scalar(
-                "time/data", step_time, self.step
+            "time/data", step_time, self.step
         )
 
     def validate(self):
@@ -273,20 +289,20 @@ class Trainer:
         average_loss = total_loss / len(self.val_loader)
 
         self.summary_writer.add_scalars(
-                "accuracy",
-                {"test": accuracy},
-                self.step
+            "accuracy",
+            {"test": accuracy},
+            self.step
         )
         self.summary_writer.add_scalars(
-                "loss",
-                {"test": average_loss},
-                self.step
+            "loss",
+            {"test": average_loss},
+            self.step
         )
         print(f"validation loss: {average_loss:.5f}, accuracy: {accuracy * 100:2.2f}")
 
 
 def compute_accuracy(
-    labels: Union[torch.Tensor, np.ndarray], preds: Union[torch.Tensor, np.ndarray]
+        labels: Union[torch.Tensor, np.ndarray], preds: Union[torch.Tensor, np.ndarray]
 ) -> float:
     """
     Args:
@@ -321,7 +337,16 @@ def get_summary_writer_log_dir(args: argparse.Namespace) -> str:
 
 def patchify(batch: torch.Tensor, x_size: int, y_size: int):
     #TASK 1
-    return batch
+    B, C, H, W = batch.shape
+    assert H % x_size == 0 and W % y_size == 0, "Image dimensions must be divisible by patch size"
+
+    unfold = nn.Unfold(kernel_size=(x_size, y_size), stride=(x_size, y_size))
+    patches = unfold(batch)
+    patches = patches.transpose(1, 2)
+    return patches
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad())
 
 
 if __name__ == "__main__":
